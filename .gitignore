@@ -1,0 +1,27 @@
+# Example data: kept local only - contains proprietary data (see README)
+/examples/
+
+# Mnova documents and other large raw data, wherever they are
+*.mnova
+*.mnova.bak
+*.fid
+*.ser
+
+# Outputs from local runs
+*_refined.json
+*_report.txt
+!/examplesPublic/expected/*_refined.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

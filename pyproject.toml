@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simpleNMRclaudePeakRefine"
+dynamic = ["version"]
+description = "Automatic refinement and harmonisation of NMR 1D/2D peak picking for simpleNMR (directed by Eric Hughes, code by Claude)"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Eric Hughes" }]
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+formula = ["rdkit"]        # molecular-formula checks from the SMILES / molfile
+fast = ["scipy"]
+test = ["pytest"]
+
+[project.scripts]
+simplenmr-claude-peak-refine = "simplenmr_claude_peak_refine.refine:main"
+simplenmr-claude-peak-check = "simplenmr_claude_peak_refine.check:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "simplenmr_claude_peak_refine.refine.VERSION" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
