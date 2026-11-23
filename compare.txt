@@ -1,0 +1,51 @@
+examples/EM_SM_SUG: identical
+examples/EWK18: changed COSY_0
+    ~ COSY_0: 1 peak(s) at the same position with a new annotation
+examples/EWK18_1H_2D_only: identical
+examples/EWK18_formula: changed COSY_0
+    ~ COSY_0: 1 peak(s) at the same position with a new annotation
+examples/EWK18_mislabelled: label error (C13_1D_0: labelled C13_1D but the data is 1D 1H, pulse programme 'reset_psychetse.ptg', Mnova type '1D' - expected a 1D 13C spectrum)
+examples/HC5019: identical
+examples/HC5019_1H_2D_only: identical
+examples/JJW037_dmso: changed COSY_0
+    ~ COSY_0: 4 peak(s) at the same position with a new annotation
+examples/NCC064P22: changed COSY_0
+    ~ COSY_0: 2 peak(s) at the same position with a new annotation
+examples/alpha_ionone: changed COSY_0
+    - COSY_0 2.2308 / 2.0255  H5-H6 COSY 2 line(s); f2 share H4 55%/H5 45%; unresolved group, coupling may belong to onl
+    ~ COSY_0: 3 peak(s) at the same position with a new annotation
+examples/ethylbenzene: changed COSY_0
+    ~ COSY_0: 2 peak(s) at the same position with a new annotation
+examples/fasiglifam: changed COSY_0
+    ~ COSY_0: 5 peak(s) at the same position with a new annotation
+examples/fasiglifam_lines: changed COSY_0
+    ~ COSY_0: 5 peak(s) at the same position with a new annotation
+examples/fasiglifam_v2: changed COSY_0
+    ~ COSY_0: 5 peak(s) at the same position with a new annotation
+examples/fasiglifam_v3: changed COSY_0
+    ~ COSY_0: 5 peak(s) at the same position with a new annotation
+examples/ibuprofen: identical
+examples/ibuprofen_LP: identical
+examples/menthyl_anthranilate: changed COSY_0
+    - COSY_0 4.7940 / 1.4912  H5-H11 COSY 6 line(s); f2 share H10 49%/H11 51%; unresolved group, coupling may belong to 
+    - COSY_0 4.7940 / 1.0779  H5-H12 COSY 8 line(s); f2 share H12 50%/H13 50%; unresolved group, coupling may belong to 
+    - COSY_0 1.9698 / 1.0779  H6-H12 COSY 6 line(s); f2 share H12 50%/H13 50%; f2 share H6 100%/H7 0%; unresolved group,
+    - COSY_0 1.5105 / 1.0612  H10-H13 COSY 4 line(s); f2 share H10 50%/H11 50%; f2 share H12 44%/H13 56%; unresolved gro
+    - COSY_0 1.4912 / 1.0779  H11-H12 COSY 4 line(s); f2 share H10 50%/H11 50%; f2 share H12 44%/H13 56%; unresolved gro
+    - COSY_0 1.4912 / 1.0612  H11-H13 COSY 4 line(s); f2 share H10 50%/H11 50%; f2 share H12 44%/H13 56%; unresolved gro
+    ~ COSY_0: 7 peak(s) at the same position with a new annotation
+examples/menthyl_anthranilate_1H_2D_only: changed COSY_0
+    - COSY_0 4.7940 / 1.4912  H5-H11 COSY 6 line(s); f2 share H10 49%/H11 51%; unresolved group, coupling may belong to 
+    - COSY_0 4.7940 / 1.0779  H5-H12 COSY 8 line(s); f2 share H12 50%/H13 50%; unresolved group, coupling may belong to 
+    - COSY_0 1.9698 / 1.0779  H6-H12 COSY 6 line(s); f2 share H12 50%/H13 50%; f2 share H6 100%/H7 0%; unresolved group,
+    - COSY_0 1.5105 / 1.0612  H10-H13 COSY 4 line(s); f2 share H10 50%/H11 50%; f2 share H12 44%/H13 56%; unresolved gro
+    - COSY_0 1.4912 / 1.0779  H11-H12 COSY 4 line(s); f2 share H10 50%/H11 50%; f2 share H12 44%/H13 56%; unresolved gro
+    - COSY_0 1.4912 / 1.0612  H11-H13 COSY 4 line(s); f2 share H10 50%/H11 50%; f2 share H12 44%/H13 56%; unresolved gro
+    ~ COSY_0: 7 peak(s) at the same position with a new annotation
+examples/nerol_cis-3_7: identical
+examples/propyl_benzoate: identical
+examples/propyl_benzoate_1H_2D_only: identical
+examples/salsalate: identical
+examples/santonin: identical
+
+11 identical, 12 changed

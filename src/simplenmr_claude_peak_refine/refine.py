@@ -72,7 +72,7 @@ try:
 except ImportError:  # pragma: no cover
     linear_sum_assignment = None
 
-VERSION = "0.26"
+VERSION = "0.27"
 
 TYPE_NAMES = {0: "compound", 1: "artifact", 2: "impurity", 3: "solvent",
               4: "cs_ref", 5: "quant_ref"}
@@ -127,7 +127,7 @@ class Params:
     ch2_merge_frac: float = 0.25     # no 13C: two CH2 HSQC groups closer than this x f1 resolution = one carbon
     hmbc_q_min_peaks: int = 2        # no 13C: an HMBC f1 row needs this many peaks to become a quaternary carbon  # False: duplicate HSQC picks are dropped from the output
     strong_coupling_hz: float = 20.0  # COSY-connected pair closer than this flagged
-    cosy_group_share: float = 0.35       # unresolved group: member kept if it carries this share of the cross-peak f2 intensity
+    cosy_group_share: float = 0.35       # unresolved group: 2nd member also kept if the f2 centroid lies between the two, at least this fraction of the way from the nearer one
     cosy_weak_frac: float = 0.2          # COSY pair weaker than this x the strongest pair of either proton is marked weak
     cosy_keep_diagonal: bool = False     # COSY output: one peak per coupled pair, f2 = higher shift
     clipcosy_keep_direct: bool = False   # HSQC-CLIP-COSY output: relay peaks only (direct ones duplicate the HSQC)
@@ -2163,13 +2163,20 @@ def refine_cosy(sp, protons, P: Params, rep: list, confirm=None):
             return [(members[0], "")]
         as_f2 = [pk for pk, ga, gb in picks if ga == group_key]
         if as_f2:
-            share = {h.id: 0.0 for h in members}
-            for p in as_f2:
-                share[min(members, key=lambda h: abs(h.delta - p.d2)).id] += abs(p.intensity)
-            tot = sum(share.values()) or 1.0
-            kept = [h for h in members if share[h.id] / tot >= P.cosy_group_share] or \
-                   [max(members, key=lambda h: share[h.id])]
-            note = "f2 share " + "/".join(f"{h.id} {share[h.id] / tot:.0%}" for h in members)
+            # The f2 lines of one multiplet spread over its whole width, so giving each line to
+            # its nearest member splits them evenly between close members.  Use the
+            # intensity-weighted f2 centroid of the cross-peak instead; keep a second member
+            # only when the centroid lies near the middle between the two (genuinely shared).
+            c = wc([p.d2 for p in as_f2], [p.intensity for p in as_f2])
+            ranked = sorted(members, key=lambda h: abs(h.delta - c))
+            best, nxt = ranked[0], ranked[1]
+            gap = abs(nxt.delta - best.delta) or 1e-9
+            kept = [best]
+            between = (c - best.delta) * (nxt.delta - best.delta) > 0
+            # one line is a single multiplet line, not a centre: never enough to keep two members
+            if len(as_f2) > 1 and between and abs(c - best.delta) / gap > P.cosy_group_share:
+                kept.append(nxt)
+            note = f"f2 centroid {c:.4f} -> " + "/".join(h.id for h in kept)
             return [(h, note) for h in kept]
         as_f1 = [pk for pk, ga, gb in picks if gb == group_key]
         c = wc([p.d1 for p in as_f1], [p.intensity for p in as_f1])
