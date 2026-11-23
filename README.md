@@ -55,12 +55,22 @@ doc, report = refine("export.json", "refined.json")
 
 ## The Mnova round trip
 
-1. In Mnova, choose the spectra in the simpleNMR dialog and export the peaks. This uses the
-   export script in `simpleNMRtools/MNOVAscripts`.
+1. In Mnova, run `collectPeaks.qs`. Its dialog (`peakRefineDialog.qs`) asks only which
+   spectra to use and what each one is (H1_1D, H1_pureshift, C13_1D, HSQC, HMBC, …, or SKIP).
+   It writes `<document>_claudePeakPicked_mresnova.json` next to the Mnova document. No
+   server is contacted.
 2. Run `simplenmr-claude-peak-refine` on the exported JSON.
-3. Read the refined JSON back into Mnova with the read-back script in
-   `simpleNMRtools/MNOVAscripts` (clear-and-replace of the 2D peaks, the 1H multiplets and
-   integrals, and the 13C peaks).
+3. Read the refined JSON back into Mnova with `readRevisedPeaks.qs` (clear-and-replace of
+   the peaks). Before changing anything, it saves the current peaks of every spectrum it
+   replaces to `<document>_peaksBeforeRefine.json` next to the Mnova document.
+4. To go back to the unrefined peaks (for testing, or to try a different choice of
+   spectra), run `undoRefinedPeaks.qs`. It restores the saved peaks: positions,
+   intensities and, where Mnova allows it, type, kind, flags and annotation.
+
+The export dialog remembers its choices, by spectrum, in `peakRefine_exptIdentifiers.json`
+in the document's folder. This file is separate from the simpleNMR verify step's
+`exptIdentifiers.json`, because the two steps usually use different spectra. The first
+time, the verify step's choices are used as a starting point.
 
 The two Mnova scripts stay in simpleNMRtools, because Mnova loads its scripts and toolbar
 (`simpleNMRtools.mui`) from that one folder.
