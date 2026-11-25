@@ -1,6 +1,6 @@
 # simpleNMRclaudePeakRefine: how peak positions are refined and harmonised
 
-Automatic peak-picking refinement for Mnova exports used by simpleNMR. Program version 0.25, November 2026. Also available as [refinement_logic.pdf](refinement_logic.pdf).
+Automatic peak-picking refinement for Mnova exports used by simpleNMR. Program version 0.28, November 2026. Also available as [refinement_logic.pdf](refinement_logic.pdf) (written for 0.25; the tolerance note in section 2 is new in 0.28).
 
 > The program never trusts a single spectrum. From all the available evidence it builds one list of proton shifts and one list of carbon shifts. It then rewrites every spectrum so that its peaks sit exactly on those lists. Each shift is decided once, and every spectrum is made to agree with it.
 
@@ -12,6 +12,8 @@ Automatic peak-picking refinement for Mnova exports used by simpleNMR. Program v
 
 ## 2. Set tolerances from each spectrum's own resolution
 Every matching window is a number of digital points in that spectrum's dimension (`sw_Hz / spectral_size`), with small minimum values in Hz, converted to ppm with that dimension's spectrometer frequency. A 1D shift is precise to well under 1 Hz, while a 2D cross-peak is only as good as its point grid. So the 1D spectra decide the positions, and the 2D spectra decide which positions are real.
+
+The proton window used to give an HSQC (or other H-C 2D) pick to a proton when the pick lies outside every 1H multiplet is the same rule simpleNMR uses to match HMBC/COSY protons to the HSQC rows: `tolerance.py`, copied unchanged from simpleNMRtools `core/tolerance.py` (3 points of the coarser f2 grid of the spectrum and the HSQC, at least 4 Hz). The tests that decide whether two HSQC signals are one or two (an HSQC row against a pureshift peak, and pooling HSQC picks that have no proton) are resolution tests, not matching windows, so they keep their own tighter value (`split_tol_pts`, 2 points, at least 4 Hz): a wider value merges real protons, as in EWK18 (1.1118 on C12, 15 Hz from 1.1333 on C14), and pools separate weak picks, as in santonin (1.3711 and 1.3940). The HMBC and COSY windows work on clusters of multiplet lines and keep their own values.
 
 ## 3. Build the carbon list
 **With a 13C 1D spectrum:**

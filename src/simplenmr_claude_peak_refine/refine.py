@@ -1,5 +1,5 @@
 """
-simpleNMRclaudePeakRefine (refine.py)  -  v0.26
+simpleNMRclaudePeakRefine (refine.py)  -  v0.28
 
 Refine Mnova HSQC / HMBC peak picking using 1D 1H, pureshift and 13C peak lists.
 
@@ -67,12 +67,17 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+try:                                    # package import (normal use)
+    from . import tolerance
+except ImportError:                     # refine.py run on its own, tolerance.py beside it
+    import tolerance
+
 try:
     from scipy.optimize import linear_sum_assignment
 except ImportError:  # pragma: no cover
     linear_sum_assignment = None
 
-VERSION = "0.27"
+VERSION = "0.28"
 
 TYPE_NAMES = {0: "compound", 1: "artifact", 2: "impurity", 3: "solvent",
               4: "cs_ref", 5: "quant_ref"}
@@ -95,8 +100,13 @@ class Params:
     h1_min_cluster_frac: float = 0.1 # ... a line cluster below this x the median cluster area needs 2D support
     split_f2_gap_hz: float = 16.0    # ... HSQC picks on one carbon group further apart than this in f2 are different protons
     h1_line_assign_hz: float = 25.0 # 1H lines assigned to nearest resonance within this
-    hsqc_tol_pts: float = 2.0       # HSQC match tolerance, in digital points of each dimension
-    hsqc_min_tol_h_hz: float = 4.0
+    hsqc_tol_pts: float = 2.0       # HSQC carbon (f1) match tolerance, in f1 digital points.  The proton (f2)
+                                    # tolerance of the HSQC and other H-C 2D spectra comes from tolerance.py,
+                                    # shared with simpleNMR (tolerance.N_POINTS, tolerance.FLOOR_HZ)
+    split_tol_pts: float = 2.0      # HSQC proton (f2) resolution test - two signals are different when further apart
+    split_min_tol_hz: float = 4.0   # than this many HSQC f2 points (at least this in Hz): HSQC row vs pureshift peak,
+                                    # and pooling HSQC picks that have no proton.  A resolution test, not a matching
+                                    # window, so it stays tighter than the shared matching tolerance
     hmbc_f1_tol_pts: float = 2.0    # HMBC f1 -> 13C tolerance in f1 points (picks sit on the grid)
     hmbc_f1_tol_res: float = 0.25   # ... or this fraction of the f1 resolution (1/AQ), whichever is larger
     hmbc_gap_hz: float = 12.0       # lines closer than this in a carbon row form one cluster
@@ -192,6 +202,21 @@ class Spectrum:
 
     def compound(self):
         return [p for p in self.peaks if p.type == COMPOUND]
+
+
+def proton_tol_ppm(spec: "Spectrum", ref: "Spectrum | None" = None) -> float:
+    """Tolerance in ppm for giving the proton (f2) of a 2D pick to a proton.
+
+    The same rule simpleNMR uses when it matches HMBC/COSY protons to the HSQC rows
+    (tolerance.py, copied unchanged from simpleNMRtools core/tolerance.py):
+        max(N_POINTS x the coarser f2 point spacing of this spectrum and the HSQC, FLOOR_HZ)
+    ref is the HSQC (None when spec is the HSQC itself)."""
+    ref = ref if ref is not None else spec
+    doc = {"SPEC_0": spec.raw, "HSQC_0": ref.raw}
+    tol = tolerance.match_tolerance_ppm(doc, "SPEC", -1, ref_label="HSQC", ref_nucleus="1H")
+    if tol is None:                      # metadata not readable by tolerance.py: same rule from the parsed values
+        tol = max(tolerance.N_POINTS * max(spec.pt_hz(-1), ref.pt_hz(-1)), tolerance.FLOOR_HZ) / spec.sf[-1]
+    return tol
 
 
 def _as_list(v):
@@ -575,7 +600,7 @@ def split_by_hsqc(sp, protons, P: Params, rep: list, strong_pos=None):
     if hs is None or not hs.compound():
         return protons
     sfC, sfH = hs.sf
-    tolH = max(P.hsqc_tol_pts * hs.pt_hz(1), P.hsqc_min_tol_h_hz) / sfH
+    tolH = max(P.split_tol_pts * hs.pt_hz(1), P.split_min_tol_hz) / sfH   # resolution test (see Params)
     tolC = P.hsqc_tol_pts * hs.pt_hz(0) / sfC
     pad = P.ps_range_pad_hz / sfH
     by_range = {}
@@ -1300,7 +1325,6 @@ def carbons_from_2d(sp, protons, P, rep):
     tolC_hs = 0.0
     if hs is not None and hs.compound():
         sfC, sfH = hs.sf
-        tolH = max(P.hsqc_tol_pts * hs.pt_hz(1), P.hsqc_min_tol_h_hz) / sfH
         tolC_hs = P.hsqc_tol_pts * hs.pt_hz(0) / sfC
         hgroups, _, _ = hsqc_groups(hs, protons, P)
         best = {}
@@ -1553,7 +1577,6 @@ def hsqc_extra_picks(hs, protons, carbons, P: Params, rep=None):
     if not carbons:
         return []
     sfC, sfH = hs.sf
-    tolH = max(P.hsqc_tol_pts * hs.pt_hz(1), P.hsqc_min_tol_h_hz) / sfH
     tolC = P.hsqc_tol_pts * hs.pt_hz(0) / sfC
     pad = P.ps_range_pad_hz / sfH
     solvH = solvent_h1_positions(hs.raw.get("solvent", ""))
@@ -1579,7 +1602,8 @@ def hsqc_groups(hs, protons, P: Params, extra=()):
     Returns a list of dicts: h (Proton or None), kind, f1, f2 (intensity-weighted), strength
     (sum |I|), intensity (signed sum), peaks."""
     sfC, sfH = hs.sf
-    tolH = max(P.hsqc_tol_pts * hs.pt_hz(1), P.hsqc_min_tol_h_hz) / sfH
+    tolH = proton_tol_ppm(hs)
+    tolH_res = max(P.split_tol_pts * hs.pt_hz(1), P.split_min_tol_hz) / hs.sf[1]   # resolution test (see Params)
     tolC = P.hsqc_tol_pts * hs.pt_hz(0) / sfC
     pad = P.ps_range_pad_hz / sfH
     byowner = {}
@@ -1597,7 +1621,7 @@ def hsqc_groups(hs, protons, P: Params, extra=()):
         pks.sort(key=lambda p: p.d1)
         sub = [[pks[0]]]
         for p in pks[1:]:
-            same_f2 = h is not None or abs(p.d2 - sub[-1][-1].d2) <= 2 * tolH
+            same_f2 = h is not None or abs(p.d2 - sub[-1][-1].d2) <= 2 * tolH_res
             if p.d1 - sub[-1][-1].d1 <= tolC and same_f2:
                 sub[-1].append(p)
             else:
@@ -2238,7 +2262,7 @@ def _is_clipcosy(spec):
     return spec.name == HSQC_CLIPCOSY
 
 
-def refine_hc_other(spec, protons, carbons, links, P: Params, rep: list, cosy_present=True):
+def refine_hc_other(spec, protons, carbons, links, P: Params, rep: list, cosy_present=True, hsqc=None):
     """Snap an additional H-C correlation spectrum (CLIP-COSY, DEPT-edited HSQC ...).
 
     Each compound pick is given to a proton (1H footprint) and a carbon.  Expected positions
@@ -2251,7 +2275,7 @@ def refine_hc_other(spec, protons, carbons, links, P: Params, rep: list, cosy_pr
     sfC, sfH = spec.sf
     clip = _is_clipcosy(spec)
     pad = max(P.ps_range_pad_hz, 2 * spec.pt_hz(1)) / sfH
-    tolH = max(P.hsqc_tol_pts * spec.pt_hz(1), P.hsqc_min_tol_h_hz) / sfH
+    tolH = proton_tol_ppm(spec, hsqc)
     strict = max(P.hc_tol_pts * spec.pt_hz(0), 0.5 * spec.res_hz(0)) / sfC
     wide = max(strict, P.hc_expected_res * spec.res_hz(0) / sfC)
     cmap, hmap = {c.id: c for c in carbons}, {h.id: h for h in protons}
@@ -2496,7 +2520,7 @@ def refine(path_in: str, path_out: str | None = None, params: Params | None = No
         if spec.ndim == 2 and name not in (HSQC, HMBC, COSY) and \
                 [str(n).strip() for n in spec.nuclei] == ["13C", "1H"]:
             extra[name], rp = refine_hc_other(spec, protons, carbons, links, P, rep,
-                                              cosy_present=cosy_usable)
+                                              cosy_present=cosy_usable, hsqc=sp.get(HSQC))
             if _is_clipcosy(spec):
                 relay_pairs |= rp
     cosy_out, _ = refine_cosy(sp, protons, P, rep, confirm=relay_pairs or None)
@@ -2564,6 +2588,8 @@ def refine(path_in: str, path_out: str | None = None, params: Params | None = No
     new["peakRefinement"] = {"datatype": "peakRefinement", "count": 1, "data": {"0": {
         "version": VERSION,
         "parameters": P.__dict__,
+        "tolerance": {"version": tolerance.TOLERANCE_VERSION, "n_points": tolerance.N_POINTS,
+                      "floor_hz": tolerance.FLOOR_HZ},
         "molecularFormula": fcheck,
         "report": rep,
         "protons": [{"id": h.id, "delta": h.delta, "source": h.source, "multiplet": h.mult_category,
