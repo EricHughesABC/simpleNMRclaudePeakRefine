@@ -33,13 +33,18 @@ inside each multiplet); otherwise multiplets are built from the 1H line picks (s
 centres, lines hidden under solvent allowed) and split by HSQC carbons.
 
 Spectrum labels (exptIdentifiers, chosen by the user in the Mnova dialog) are authoritative:
-H1_1D, H1_pureshift, C13_1D, COSY, HSQC, HMBC, HSQC_CLIPCOSY, DDEPTCH3ONLY are used as labelled
-(dataset <label>_0; a second dataset <label>_1 is left unchanged for now); NOESY and DEPT135
-are checked but not refined yet; SKIP (and unknown labels, predicted spectra, spectra without
+H1_1D, H1_pureshift, C13_1D, DEPT135, COSY, HSQC, HMBC, HSQC_CLIPCOSY, DDEPTCH3ONLY are used as
+labelled (dataset <label>_0; a second dataset <label>_1 is left unchanged for now); NOESY is
+checked but not refined yet; SKIP (and unknown labels, predicted spectra, spectra without
 acquisition metadata) are not analysed.  Everything not refined is left unchanged in the output.  Each label is checked against the nucleus,
 dimension, pulse programme and Mnova experiment type; a contradiction stops the program with
 an error report (exit code 2, no output written) so the labels can be fixed in Mnova.
 H1_1D and HSQC are required.
+
+DEPT-135 (v0.29): signs give CH2 vs CH/CH3 per carbon; with a non-edited HSQC they set the HSQC
+multiplicity (written peaks keep their measured sign); with an edited HSQC they are a cross-check.
+DEPT peaks with no 13C carbon but an HSQC cross-peak are added as carbons; without a 13C 1D the
+HSQC-f1 carbons take the DEPT positions.  The DEPT is written back with one peak per carbon.
 
 Molecular formula (v0.24): if the export carries the proposed structure ('smiles' or 'molfile',
 count > 0), only its molecular formula is used (computed with RDKit) - never the connectivity
@@ -77,7 +82,7 @@ try:
 except ImportError:  # pragma: no cover
     linear_sum_assignment = None
 
-VERSION = "0.28"
+VERSION = "0.29"
 
 TYPE_NAMES = {0: "compound", 1: "artifact", 2: "impurity", 3: "solvent",
               4: "cs_ref", 5: "quant_ref"}
@@ -145,6 +150,8 @@ class Params:
     hc_expected_res: float = 2.0         # ... wider f1 tolerance (x f1 resolution) for expected direct/relay positions
     reclassify_ps: bool = True        # test Mnova solvent/impurity-typed pureshift peaks inside compound multiplets
     reclassify_hmbc: bool = True      # absorb impurity/artifact-typed HMBC lines that join compound clusters
+    dept_match_hz: float = 3.0        # DEPT-135 peak -> 13C carbon (or at least dept_match_pts DEPT points)
+    dept_match_pts: float = 3.0
 
 
 # --------------------------------------------------------------------------- #
@@ -163,6 +170,11 @@ class Peak:
     flags_raw: int
     annotation: str
     raw: dict
+    kind_meas: int = 0      # kind as measured (sign of the intensity); 'kind' may be set from the DEPT-135
+
+    def __post_init__(self):
+        if not self.kind_meas:
+            self.kind_meas = self.kind
 
     @property
     def flags(self) -> int:
@@ -281,7 +293,7 @@ PURESHIFT_PULSE = ("psyche", "pure", "reset_", "zangger", "bird", "pshift")
 # the spectra keys of the Mnova/simpleNMR spectrum-selection dialog
 KNOWN_LABELS = (H1_1D, H1_PURESHIFT, C13_1D, COSY, HSQC, HMBC, HSQC_CLIPCOSY, DDEPTCH3ONLY,
                 NOESY, DEPT135)
-REFINED_LABELS = (H1_1D, H1_PURESHIFT, C13_1D, COSY, HSQC, HMBC, HSQC_CLIPCOSY, DDEPTCH3ONLY)
+REFINED_LABELS = (H1_1D, H1_PURESHIFT, C13_1D, DEPT135, COSY, HSQC, HMBC, HSQC_CLIPCOSY, DDEPTCH3ONLY)
 
 
 class LabelError(Exception):
@@ -659,6 +671,7 @@ def split_by_hsqc(sp, protons, P: Params, rep: list, strong_pos=None):
                                f"far from the others in f1")
                 weak = [g for g in weak if g not in rescued]
             groups = [g for g in groups if g not in weak]
+        groups = _split_close_carbons(groups, sp, hs, P, sfH, rep, members[0])
         if len(groups) <= 1:
             out += members
             continue
@@ -741,6 +754,55 @@ def split_by_hsqc(sp, protons, P: Params, rep: list, strong_pos=None):
                     rep.append(f"Protons: HSQC carbon {f1:.2f} in 1H multiplet {ref.mult_delta:.4f} has no pureshift "
                                f"peak within {tolH * sfH:.1f} Hz - proton added at {f2:.4f} from the HSQC row")
                     out.append(pr)
+    return out
+
+
+def _split_close_carbons(groups, sp, hs, P: Params, sfH, rep, ref):
+    """Two carbons closer than the HSQC f1 tolerance end up in one HSQC carbon group.  Such a group
+    holds two protons when its picks fall into f2 clusters further apart than split_f2_gap_hz,
+    each cluster's f1 is nearest a different 13C carbon (in the same f1 order, at least half an
+    f1 point apart) and, with a DEPT-135, both carbons are protonated.  Example: colchicine
+    OCH3 56.51/3.871 and 56.30/3.833, picked by Mnova as one 6H 'doublet' (J 19 Hz)."""
+    c13 = sp.get(C13_1D)
+    if c13 is None:
+        return groups
+    sfC = hs.sf[0]
+    tolC = P.hsqc_tol_pts * hs.pt_hz(0) / sfC
+    half_pt = 0.5 * hs.pt_hz(0) / sfC
+    cpk = [p.d1 for p in c13.compound()]
+    dps = [q.d1 for q in dept_peaks(sp, P)] if DEPT135 in sp else None
+    dtol = 3.0 / sfC
+    out = []
+    for g in groups:
+        if len(g) < 2:
+            out.append(g)
+            continue
+        gs = sorted(g, key=lambda p: -p.d2)
+        sub = [[gs[0]]]
+        for p in gs[1:]:
+            if (sub[-1][-1].d2 - p.d2) * sfH > P.split_f2_gap_hz:
+                sub.append([])
+            sub[-1].append(p)
+        if len(sub) < 2:
+            out.append(g)
+            continue
+        f1s = [_wmean([p.d1 for p in c], [abs(p.intensity) for p in c]) for c in sub]
+        near = [min(cpk, key=lambda x: abs(x - f)) if cpk else None for f in f1s]
+        ok = (all(n is not None and abs(n - f) <= tolC for n, f in zip(near, f1s))
+              and len(set(near)) == len(near)
+              and all(abs(a - b) >= half_pt for i, a in enumerate(f1s) for b in f1s[i + 1:])
+              and all((f1s[i] - f1s[j]) * (near[i] - near[j]) > 0
+                      for i in range(len(f1s)) for j in range(i + 1, len(f1s)))
+              and (dps is None or all(any(abs(d - n) <= dtol for d in dps) for n in near)))
+        if not ok:
+            out.append(g)
+            continue
+        out += sub
+        rep.append(f"Protons: 1H multiplet {ref.mult_delta:.4f} ({ref.mult_category}): one HSQC carbon group holds "
+                   f"picks on {len(sub)} 13C carbons closer than the HSQC f1 tolerance (" +
+                   ", ".join(f"{_wmean([p.d2 for p in c], [abs(p.intensity) for p in c]):.4f}/{n:.3f}"
+                             for c, n in zip(sub, near)) +
+                   f"), f2 clusters more than {P.split_f2_gap_hz:.0f} Hz apart - one proton per carbon")
     return out
 
 
@@ -876,6 +938,8 @@ def _split_centres(lines, ests, masked, sfH, win_hz, tol_hz=0.6, half_hz=25.0, n
                 out.add(i)
         return frozenset(out)
 
+    w = [abs(p.intensity) for p in lines]
+    wsum = sum(w)
     cands = []
     ncand = ncand if len(ests) > 3 else 3 * ncand
     for e in ests:
@@ -894,7 +958,11 @@ def _split_centres(lines, ests, masked, sfH, win_hz, tol_hz=0.6, half_hz=25.0, n
             near = min((j for j, c in enumerate(cs) if c is not None), key=lambda j: abs(cs[j] - x), default=None)
             if near is not None and i in combo[near][1]:
                 own += 1
-        return (len(cov), own, -dist)
+        # explained intensity first, in steps of 10% (v0.29): two small lines must not outvote a
+        # strong singlet (colchicine OCH3 3.8329, 22095, vs the pair 3.8415/3.8374, 1657);
+        # within a step the line count decides as before
+        share = round(sum(w[i] for i in cov) / wsum, 1) if wsum else 0.0
+        return (share, len(cov), own, -dist)
 
     best = None
     n_combo = 1
@@ -920,7 +988,7 @@ def _split_centres(lines, ests, masked, sfH, win_hz, tol_hz=0.6, half_hz=25.0, n
                 break
         if cur_key is not None:
             best = (cur_key, [c for c, _ in cur])
-    return (best[1], best[0][0]) if best else ([None] * len(ests), 0)
+    return (best[1], best[0][1]) if best else ([None] * len(ests), 0)
 
 
 def h1_line_multiplets(sp, P: Params, rep: list, covered=None):
@@ -1300,8 +1368,11 @@ class Carbon:
     delta: float
     mult: str = ""            # CH / CH2 / Cq? from HSQC
     protons: list = field(default_factory=list)
-    source: str = "C13"       # where delta came from: C13 (1D), HSQC or HMBC (f1)
+    source: str = "C13"       # where delta came from: C13 (1D), DEPT135, HSQC or HMBC (f1)
     peak_key: str | None = None   # key of the 13C 1D peak it came from
+    dept: str = ""            # DEPT-135 sign: CH2 (negative), CH/CH3 (positive), "" = no DEPT peak / no DEPT
+    dept_key: str | None = None   # key of the DEPT-135 peak used for this carbon
+    dept_intensity: float = 0.0
 
 
 def _wmean(vals, weights):
@@ -1564,6 +1635,218 @@ def build_carbons(sp, P: "Params" = None, rep: list | None = None, protons=None,
 
 
 # --------------------------------------------------------------------------- #
+# DEPT-135
+# --------------------------------------------------------------------------- #
+def dept_peaks(sp, P: Params):
+    """Compound DEPT-135 picks above the noise threshold (same rule as the 13C 1D), strongest first."""
+    dp = sp.get(DEPT135)
+    if dp is None or not dp.compound():
+        return []
+    top = sorted((abs(p.intensity) for p in dp.compound()), reverse=True)[:max(1, P.c13_ref_n)]
+    dp.ref = st.median(top)
+    return sorted((p for p in dp.compound() if abs(p.intensity) >= P.c13_min_frac * dp.ref),
+                  key=lambda p: -abs(p.intensity))
+
+
+def hsqc_edited_by_name(hs):
+    """True / False from the Mnova experiment type ('HSQC-EDITED') or the Bruker pulse programme
+    ('hsqced...'); None if the spectrum does not say."""
+    exp = (str(hs.raw.get("experiment", "")) + " " + str(hs.raw.get("subtype", ""))).upper()
+    pp = str(hs.raw.get("pulsesequence", "")).lower()
+    if "EDITED" in exp or pp.startswith("hsqced") or "hsqcedet" in pp:
+        return True
+    if pp.startswith("hsqc") or "HSQC" in exp:
+        return False
+    return None
+
+
+def hsqc_nonedited_negatives(sp, P: Params, rep: list):
+    """A non-edited HSQC (by name) has no negative cross-peaks: negative compound picks are f1
+    truncation wiggles of a stronger positive peak in the same f2 column (within wiggle_res x the
+    f1 resolution).  They are retyped artifact before the analysis.  Negative picks that are not
+    explained this way are reported; if there are two or more, the HSQC is treated as edited."""
+    hs = sp.get(HSQC)
+    if hs is None or hsqc_edited_by_name(hs) is not False:
+        return
+    neg = [p for p in hs.compound() if p.intensity < 0]
+    if not neg:
+        return
+    sfC, sfH = hs.sf
+    col = max(10.0, hs.res_hz(1)) / sfH
+    span = P.wiggle_res * hs.res_hz(0) / sfC
+    pos = [q for q in hs.compound() if q.intensity > 0]
+    wig, other = [], []
+    for p in neg:
+        par = [q for q in pos if abs(q.d2 - p.d2) <= col and abs(q.d1 - p.d1) <= span
+               and q.intensity > abs(p.intensity)]
+        (wig if par else other).append((p, max(par, key=lambda q: q.intensity) if par else None))
+    if len(other) >= 2:
+        rep.append(f"HSQC WARNING: labelled non-edited ('{hs.raw.get('pulsesequence', '')}') but {len(other)} negative "
+                   f"picks are not f1 wiggles of a positive peak - treated as a multiplicity-edited HSQC")
+        return
+    for p, q in wig:
+        why = (f"negative pick in a non-edited HSQC, {(p.d1 - q.d1) * sfC:+.0f} Hz in f1 from the positive peak "
+               f"{q.d2:.4f}/{q.d1:.2f} ({abs(p.intensity) / q.intensity:.0%}) - f1 truncation wiggle")
+        p.type = ARTIFACT
+        p.raw = {**p.raw, "type": ARTIFACT, "annotation": "artifact: " + why}
+    if wig:
+        rep.append(f"HSQC: non-edited ('{hs.raw.get('pulsesequence', '')}') - {len(wig)} negative picks typed artifact "
+                   "(f1 truncation wiggles): " + ", ".join(f"{p.d2:.4f}/{p.d1:.2f}" for p, _ in wig))
+    for p, _ in other:
+        rep.append(f"HSQC WARNING: negative pick {p.d2:.4f}/{p.d1:.2f} in a non-edited HSQC is not a wiggle of a "
+                   f"positive peak - review")
+
+
+def hsqc_kind_from_dept(sp, P: Params, rep: list):
+    """Non-edited HSQC (no negative compound picks) + DEPT-135: every HSQC pick takes the sign of
+    the nearest DEPT peak within the HSQC f1 tolerance, so the HSQC rules (a CH2 carbon carries up
+    to two protons, CH/CH3 one) work as for an edited HSQC.  Only Peak.kind changes; the written
+    intensities and kinds keep their measured sign (Peak.kind_meas).  Returns True if applied."""
+    hs, dp = sp.get(HSQC), sp.get(DEPT135)
+    if hs is None or not hs.compound():
+        return False
+    if any(p.intensity < 0 for p in hs.compound()):
+        return False                      # edited HSQC: its own sign is used, the DEPT is a cross-check
+    if dp is None:
+        if hsqc_edited_by_name(hs) is not True:
+            rep.append("HSQC WARNING: the HSQC has no negative peaks and its pulse programme "
+                       f"'{hs.raw.get('pulsesequence', '')}' does not look multiplicity-edited, and no DEPT135 was "
+                       "supplied - CH2 carbons cannot be recognised, so the second proton of a diastereotopic CH2 "
+                       "is typed artifact. Supply a DEPT-135 or an edited HSQC")
+        return False
+    dps = dept_peaks(sp, P)
+    if not any(p.intensity < 0 for p in dps):
+        rep.append("DEPT-135: no negative (CH2) peaks - HSQC not edited, all its carbons treated as CH/CH3")
+        return False
+    sfC = hs.sf[0]
+    tolC = P.hsqc_tol_pts * hs.pt_hz(0) / sfC
+    n2, mixed = 0, set()
+    for p in hs.peaks:
+        near = sorted((q for q in dps if abs(q.d1 - p.d1) <= tolC), key=lambda q: abs(q.d1 - p.d1))
+        if not near:
+            continue
+        if p.type == COMPOUND and len({q.intensity < 0 for q in near}) > 1:
+            mixed.add(round(p.d1, 2))
+        if near[0].intensity < 0:
+            p.kind = 2
+            n2 += p.type == COMPOUND
+    rep.append(f"DEPT-135: HSQC not multiplicity-edited - {n2} HSQC compound picks on negative DEPT peaks "
+               f"treated as CH2 (written with their measured sign)")
+    if mixed:
+        rep.append("DEPT-135 WARNING: HSQC picks with DEPT peaks of both signs within the HSQC f1 tolerance "
+                   f"({tolC * sfC:.0f} Hz), nearest used: f1 " + ", ".join(f"{x:.2f}" for x in sorted(mixed)))
+    return True
+
+
+def add_dept_carbons(sp, carbons, P: Params, rep: list):
+    """Match the DEPT-135 to the carbon list: each carbon gets the DEPT sign (CH2 / CH/CH3) of its
+    strongest DEPT peak.  A DEPT peak with no 13C carbon becomes a carbon (source DEPT135) when an
+    HSQC compound pick confirms it and no carbon is within the HSQC f1 tolerance (the 13C pick may
+    have missed it).  Without a 13C 1D, HSQC-f1 carbons take the DEPT position.  Other DEPT
+    picks are recorded in dept.excluded (retyped in the written DEPT)."""
+    dp = sp.get(DEPT135)
+    if dp is None:
+        return carbons
+    dp.excluded = {}
+    dps = dept_peaks(sp, P)
+    for p in dp.compound():
+        if p not in dps:
+            dp.excluded[p.key] = (ARTIFACT, "below the DEPT-135 threshold (noise)")
+    if not dps:
+        return carbons
+    sfC = dp.sf[-1]
+    hs = sp.get(HSQC)
+    tolC_hs = P.hsqc_tol_pts * hs.pt_hz(0) / hs.sf[0] if hs is not None else 0.0
+    tol = max(P.dept_match_hz, P.dept_match_pts * dp.pt_hz()) / sfC
+    has_c13 = C13_1D in sp
+    offs, added, snapped = [], [], []
+    for p in dps:                                   # strongest first
+        sign = "CH2" if p.intensity < 0 else "CH/CH3"
+        if has_c13:
+            c = min((c for c in carbons if c.source == "C13"), key=lambda c: abs(c.delta - p.d1), default=None)
+            ok = c is not None and abs(c.delta - p.d1) <= tol
+        else:                                       # carbons from HSQC f1: the DEPT gives the position
+            c = min((c for c in carbons if c.source in (HSQC, DEPT135)), key=lambda c: abs(c.delta - p.d1),
+                    default=None)
+            ok = c is not None and abs(c.delta - p.d1) <= tolC_hs
+        if ok and c.dept_key is None:
+            if has_c13:
+                offs.append((p.d1 - c.delta) * sfC)
+            else:
+                snapped.append(f"{c.delta:.2f} -> {p.d1:.4f}")
+                c.delta, c.source = p.d1, DEPT135
+            c.dept, c.dept_key, c.dept_intensity = sign, p.key, p.intensity
+            continue
+        if ok:                                      # second DEPT pick on a carbon that has one
+            why = f"second DEPT-135 pick on the carbon at {c.delta:.4f} (line-fit split)"
+            if ("CH2" if c.dept_intensity < 0 else "CH/CH3") != sign:
+                why += " - opposite sign, review"
+                rep.append(f"DEPT-135 WARNING: {p.d1:.4f} has the opposite sign to the DEPT peak of the carbon "
+                           f"at {c.delta:.4f}")
+            dp.excluded[p.key] = (ARTIFACT, why)
+            continue
+        if has_c13:                                  # a 13C peak the 13C step rejected (solvent, impurity...)
+            c13 = sp[C13_1D]
+            q = min(c13.peaks, key=lambda q: abs(q.d1 - p.d1), default=None)
+            if q is not None and abs(q.d1 - p.d1) <= tol:
+                t, why = c13.excluded.get(q.key, (q.type, f"typed {TYPE_NAMES.get(q.type, q.type)} by Mnova"))
+                dp.excluded[p.key] = (t if t != COMPOUND else ARTIFACT,
+                                      f"13C peak {q.d1:.4f} at this position not used as a carbon: {why}")
+                continue
+        near = min(carbons, key=lambda c: abs(c.delta - p.d1)) if carbons else None
+        if near is not None and abs(near.delta - p.d1) <= tolC_hs:
+            dp.excluded[p.key] = (ARTIFACT, f"within the HSQC f1 tolerance ({tolC_hs * sfC:.0f} Hz) of the carbon "
+                                            f"at {near.delta:.4f}, {(p.d1 - near.delta) * sfC:+.1f} Hz - split line?")
+            continue
+        if hs is None or not any(abs(q.d1 - p.d1) <= tolC_hs for q in hs.compound()):
+            dp.excluded[p.key] = (IMPURITY, "no HSQC cross-peak at this carbon")
+            rep.append(f"DEPT-135: {p.d1:.4f} ({sign}) has no 13C carbon and no HSQC cross-peak - not used")
+            continue
+        c = Carbon("", p.d1, source=DEPT135, dept=sign, dept_key=p.key, dept_intensity=p.intensity)
+        carbons.append(c)
+        added.append(c)
+    carbons.sort(key=lambda c: -c.delta)
+    for i, c in enumerate(carbons):
+        c.id = f"C{i + 1}"
+    if offs:
+        rep.append(f"DEPT-135: {len(offs)} DEPT peaks on 13C carbons (match {tol * sfC:.1f} Hz), "
+                   f"median DEPT - 13C {st.median(offs):+.2f} Hz")
+    if snapped:
+        rep.append(f"DEPT-135: no 13C 1D - {len(snapped)} HSQC-f1 carbons moved to their DEPT positions: "
+                   + ", ".join(snapped))
+    if added:
+        rep.append(f"DEPT-135: {len(added)} protonated carbons not in the 13C peak list added from the DEPT "
+                   f"(HSQC cross-peak present): " + ", ".join(f"{c.id} {c.delta:.4f} {c.dept}" for c in added)
+                   + (" - check the 13C peak picking" if has_c13 else ""))
+    nodept = [c for c in carbons if not c.dept and c.source != HMBC]
+    n_by = {s: sum(c.dept == s for c in carbons) for s in ("CH2", "CH/CH3")}
+    rep.append(f"DEPT-135: carbons CH2 {n_by['CH2']}, CH/CH3 {n_by['CH/CH3']}, no DEPT peak {len(nodept)}")
+    return carbons
+
+
+def dept_cross_check(sp, carbons, hsqc_edited_by_dept, rep: list):
+    """After the HSQC: carbons whose HSQC multiplicity and DEPT sign disagree, and HSQC carbons
+    without a DEPT peak (or DEPT carbons without HSQC protons)."""
+    if sp.get(DEPT135) is None:
+        return
+    bad = [c for c in carbons if c.mult and c.dept and
+           ("CH2" if c.mult == "CH2" else "CH/CH3") != c.dept]
+    for c in bad:
+        rep.append(f"DEPT-135 vs HSQC: {c.id} {c.delta:.3f} is {c.mult} in the HSQC but {c.dept} in the DEPT - review")
+    miss = [c for c in carbons if c.mult and not c.dept]
+    if miss:
+        rep.append("DEPT-135 vs HSQC: protonated in the HSQC but no DEPT-135 peak: " +
+                   ", ".join(f"{c.id} {c.delta:.3f}" for c in miss))
+    lone = [c for c in carbons if c.dept and not c.protons]
+    if lone:
+        rep.append("DEPT-135 vs HSQC: DEPT peak but no HSQC proton assigned: " +
+                   ", ".join(f"{c.id} {c.delta:.3f} {c.dept}" for c in lone))
+    if not bad:
+        how = "from the DEPT signs" if hsqc_edited_by_dept else "edited HSQC sign and DEPT sign agree"
+        rep.append(f"DEPT-135 vs HSQC: multiplicities consistent ({how})")
+
+
+# --------------------------------------------------------------------------- #
 # HSQC
 # --------------------------------------------------------------------------- #
 def new_peak(d1, d2, intensity, kind, width1, width2, annotation, type_=COMPOUND, flags=0):
@@ -1660,9 +1943,20 @@ def refine_hsqc(sp, protons, carbons, P: Params, rep: list):
     on_carbon = {}            # carbon id -> list of accepted groups
     accepted = {}             # proton id -> group
     n_dup = 0
+    use_dept = DEPT135 in sp and any(c.dept for c in carbons)
+
+    def dept_rank(c, g):
+        """0 = DEPT sign fits the HSQC group, 1 = no DEPT peak (quaternary?), 2 = opposite sign"""
+        if not use_dept:
+            return 0
+        if not c.dept:
+            return 1
+        return 0 if (c.dept == "CH2") == (g["kind"] == 2) else 2
+
     for g in sorted(groups, key=lambda g: -g["strength"]):
         h = g["h"]
-        cands = sorted((c for c in carbons if abs(c.delta - g["f1"]) <= tolC), key=lambda c: abs(c.delta - g["f1"]))
+        cands = sorted((c for c in carbons if abs(c.delta - g["f1"]) <= tolC),
+                       key=lambda c: (dept_rank(c, g), abs(c.delta - g["f1"])))
         reason = None
         chosen = None
         if h is not None and h.id in accepted:
@@ -1685,7 +1979,10 @@ def refine_hsqc(sp, protons, carbons, P: Params, rep: list):
             g["c"] = chosen
             # carbons the HSQC cannot tell apart (closer than half its f1 resolution)
             g["near"] = [c for c in cands if c is not chosen
-                         and abs(c.delta - chosen.delta) * sfC < 0.5 * hs.res_hz(0)]
+                         and abs(c.delta - chosen.delta) * sfC < 0.5 * hs.res_hz(0)
+                         and dept_rank(c, g) <= dept_rank(chosen, g)]     # the DEPT decides otherwise
+            g["dept_chose"] = use_dept and any(dept_rank(c, g) > dept_rank(chosen, g) for c in cands
+                                                if abs(c.delta - chosen.delta) * sfC < 0.5 * hs.res_hz(0))
             accepted[h.id] = g
             on_carbon.setdefault(chosen.id, []).append(g)
             continue
@@ -1719,10 +2016,12 @@ def refine_hsqc(sp, protons, carbons, P: Params, rep: list):
             rep_pk = max(g["peaks"], key=lambda p: abs(p.intensity))
             matches.append((rep_pk, h, c, dH, dC))
             n_dup += len(g["peaks"]) - 1
-            out.append(new_peak(c.delta, h.delta, g["intensity"], g["kind"],
+            out.append(new_peak(c.delta, h.delta, g["intensity"], 2 if g["intensity"] < 0 else 1,
                                 st.mean(p.width1 for p in g["peaks"]), st.mean(p.width2 for p in g["peaks"]),
                                 f"{h.id}/{c.id} snapped dH {dH:+.1f}Hz dC {dC:+.1f}Hz"
+                                + (" (CH2 from DEPT-135)" if g["kind"] == 2 and g["intensity"] > 0 else "")
                                 + (f", {len(g['peaks'])} picks merged" if len(g["peaks"]) > 1 else "")
+                                + (" - C chosen by the DEPT-135" if g.get("dept_chose") and not g["ambig"] else "")
                                 + (" - ambiguous C: " + "/".join([c.id] + [x.id for x in g["ambig"]])
                                    + " (closer than HSQC f1 resolution) - review" if g["ambig"] else ""),
                                 flags=rep_pk.flags_raw))
@@ -1756,21 +2055,21 @@ def refine_hsqc(sp, protons, carbons, P: Params, rep: list):
                 reason = "weak pick with no proton and no carbon - t1 noise?"
         if reason is not None:
             for p in g["peaks"]:
-                out.append(new_peak(p.d1, p.d2, p.intensity, p.kind, p.width1, p.width2,
+                out.append(new_peak(p.d1, p.d2, p.intensity, p.kind_meas, p.width1, p.width2,
                                     "artifact: " + reason, type_=ARTIFACT, flags=p.flags_raw))
             rep.append(f"HSQC {where}: {reason} -> artifact")
         elif h is not None and not c_ok:
             h.evidence.setdefault(HSQC, []).append(g["f2"])
-            out.append(new_peak(g["f1"], h.delta, g["intensity"], g["kind"], g["peaks"][0].width1,
+            out.append(new_peak(g["f1"], h.delta, g["intensity"], 2 if g["intensity"] < 0 else 1, g["peaks"][0].width1,
                                 g["peaks"][0].width2, f"{h.id}/C? f2 snapped, C from HSQC - review"))
             rep.append(f"HSQC {where}: no 13C peak within tolerance - f1 kept, review")
         elif h is None and c_ok:
-            out.append(new_peak(cn.delta, g["f2"], g["intensity"], g["kind"], g["peaks"][0].width1,
+            out.append(new_peak(cn.delta, g["f2"], g["intensity"], 2 if g["intensity"] < 0 else 1, g["peaks"][0].width1,
                                 g["peaks"][0].width2, f"H?/{cn.id} f1 snapped, H from HSQC - review"))
             rep.append(f"HSQC {where}: no proton resonance within tolerance - f2 kept, review")
         else:
             for p in g["peaks"]:
-                out.append(new_peak(p.d1, p.d2, p.intensity, p.kind, p.width1, p.width2,
+                out.append(new_peak(p.d1, p.d2, p.intensity, p.kind_meas, p.width1, p.width2,
                                     "unmatched - review", flags=p.flags_raw))
             rep.append(f"HSQC {where}: unmatched in both dimensions - review")
     used = {id(p) for p in extra}
@@ -2290,7 +2589,10 @@ def refine_hc_other(spec, protons, carbons, links, P: Params, rep: list, cosy_pr
         partner_of = {}
         if clip:
             if cosy_present:
-                rel = {cid: oid for oid in links.get(h.id, ()) for cid in hmap[oid].carbons}
+                rel = {}             # carbon -> all COSY partners on it (sorted: deterministic)
+                for oid in sorted(links.get(h.id, ())):
+                    for cid in hmap[oid].carbons:
+                        rel[cid] = f"{rel[cid]}/{oid}" if cid in rel else oid
             else:
                 rel = {cid: "/".join(on_c[cid]) for cid in on_c if on_c[cid] and cid not in h.carbons}
             for cid, oid in rel.items():
@@ -2435,6 +2737,8 @@ def refine(path_in: str, path_out: str | None = None, params: Params | None = No
     # Pass 1 may include pureshift peaks Mnova typed solvent/impurity that sit inside compound
     # 1H multiplets.  They are kept only if HSQC or HMBC confirm them; otherwise they are
     # excluded and the analysis is repeated.
+    hsqc_nonedited_negatives(sp, P, rep)
+    dept_kind = hsqc_kind_from_dept(sp, P, rep)
     exclude, head = set(), list(rep)
     strong_pos = None
     excl_c = {}
@@ -2443,6 +2747,7 @@ def refine(path_in: str, path_out: str | None = None, params: Params | None = No
         protons = build_protons(sp, P, rep, frozenset(exclude), strong_pos)
         pureshift_sidebands(sp, protons, P, rep)
         carbons = build_carbons(sp, P, rep, protons, excl_c)
+        carbons = add_dept_carbons(sp, carbons, P, rep)
         hsqc_out, hsqc_matches = refine_hsqc(sp, protons, carbons, P, rep)
         hmbc_out, hmbc_corr = refine_hmbc(sp, protons, carbons, hsqc_matches, P, rep)
         new_c = {k: v for k, v in impurity_carbons(sp, protons, carbons, hmbc_corr, P).items() if k not in excl_c}
@@ -2527,6 +2832,7 @@ def refine(path_in: str, path_out: str | None = None, params: Params | None = No
     if cosy_out is not None:
         extra[COSY] = cosy_out
     referencing(hsqc_matches, hmbc_corr, rep)
+    dept_cross_check(sp, carbons, dept_kind, rep)
 
     sfH = sp[H1_1D].sf[-1]
     # per-proton evidence summary
@@ -2542,9 +2848,12 @@ def refine(path_in: str, path_out: str | None = None, params: Params | None = No
         tbl.append(f"{h.id:4s} {h.delta:8.4f} {h.source:12s} {h.mult_category:3s}{(h.mult_delta or 0):7.4f} "
                    f"{(f'{h.nH_est:4.1f}' if h.nH_est else '   -')} {off(h.h1_centroid):>6s} {off(hs[0]) if hs else '-':>6s} {hb_s:>14s} "
                    f"{','.join(h.carbons) or '-':10s} {'; '.join(h.flags)}")
-    tbl += ["", "Carbons", f"{'id':4s} {'delta':>9s} {HSQC:8s} {'source':6s} protons"]
+    has_dept = DEPT135 in sp
+    tbl += ["", "Carbons", f"{'id':4s} {'delta':>9s} {HSQC:8s} " + (f"{'DEPT':7s} " if has_dept else "")
+            + f"{'source':6s} protons"]
     for c in carbons:
-        tbl.append(f"{c.id:4s} {c.delta:9.4f} {c.mult or 'no HSQC':8s} {c.source:6s} {','.join(c.protons) or '(quaternary?)'}")
+        tbl.append(f"{c.id:4s} {c.delta:9.4f} {c.mult or 'no HSQC':8s} " + (f"{c.dept or '-':7s} " if has_dept else "")
+                   + f"{c.source:6s} {','.join(c.protons) or '(quaternary?)'}")
     tbl += ["", "HMBC correlations", f"{'H':4s} {'C':4s} {'n':>2s} {'dH Hz':>6s} {'dC Hz':>6s} quality"]
     for c in sorted(hmbc_corr, key=lambda c: (-c["h"].delta, -c["c"].delta)):
         tbl.append(f"{c['h'].id:4s} {c['c'].id:4s} {c['n']:2d} {c['dH']:+6.1f} {c['dC']:+6.1f} {c['quality']}"
@@ -2596,7 +2905,8 @@ def refine(path_in: str, path_out: str | None = None, params: Params | None = No
                      "nH_est": h.nH_est, "carbons": h.carbons, "spin_system": h.spin_system,
                      "flags": h.flags,
                      "evidence": {k: v for k, v in h.evidence.items()}} for h in protons],
-        "carbons": [{"id": c.id, "delta": c.delta, "hsqc": c.mult, "protons": c.protons, "source": c.source} for c in carbons],
+        "carbons": [{"id": c.id, "delta": c.delta, "hsqc": c.mult, "protons": c.protons, "source": c.source}
+                    | ({"dept": c.dept} if DEPT135 in sp else {}) for c in carbons],
         "original_peaks": originals}}}
     if path_out:
         with open(path_out, "w") as fh:
@@ -2757,12 +3067,46 @@ def write_1d(new, doc, sp, protons, carbons, rep):
                     q["type"], q["annotation"] = t, why
                     n_re += 1
             out.append(q)
+        # carbons found only in the DEPT-135: added to the 13C list (intensity on the 13C scale)
+        dp = sp.get(DEPT135)
+        scale = (getattr(c13, "ref", 0) / getattr(dp, "ref", 1)) if dp is not None and getattr(dp, "ref", 0) else 1.0
+        n_add = 0
+        for c in carbons:
+            if c.source == DEPT135 and c.peak_key is None:
+                out.append({"delta1": c.delta, "delta2": 0, "intensity": abs(c.dept_intensity) * scale,
+                            "type": COMPOUND, "kind": 1, "width1": 0.0, "width2": 0.0, "flags": 0,
+                            "annotation": f"{c.id} added from DEPT-135 (not in the 13C peak list)"})
+                n_add += 1
+        if n_add:
+            rep.append(f"1D write-back: 13C {n_add} peaks added from the DEPT-135 - check them in the 13C spectrum")
         originals[C13_1D] = raw["peaks"]
         new[c13.key]["peaks"] = {"datatype": "peaks", "count": len(out),
                                  "data": {str(i): p for i, p in enumerate(out)}}
         rep.append(f"1D write-back: 13C {len(by_key)} compound peaks (one per carbon); {n_re} compound-typed peaks "
                    f"retyped (satellite/noise -> artifact, minor -> impurity, line-fit splits -> artifact, "
                    f"solvent position -> solvent)")
+    dp = sp.get(DEPT135)
+    if dp is not None and carbons:
+        raw = doc[dp.key]
+        by_key = {c.dept_key: c for c in carbons if c.dept_key is not None}
+        excl = getattr(dp, "excluded", {})
+        out, n_re = [], 0
+        for k, p in raw["peaks"]["data"].items():
+            q = copy.deepcopy(p)
+            if p.get("type", 0) == COMPOUND:
+                if k in by_key:
+                    q["delta1"] = by_key[k].delta
+                    q["annotation"] = f"{by_key[k].id} {by_key[k].dept}"
+                else:
+                    t, why = excl.get(k, (ARTIFACT, "no carbon"))
+                    q["type"], q["annotation"] = t, why
+                    n_re += 1
+            out.append(q)
+        originals[DEPT135] = raw["peaks"]
+        new[dp.key]["peaks"] = {"datatype": "peaks", "count": len(out),
+                                "data": {str(i): p for i, p in enumerate(out)}}
+        rep.append(f"1D write-back: DEPT-135 {len(by_key)} compound peaks (one per protonated carbon, at the carbon "
+                   f"shift, measured sign); {n_re} compound-typed peaks retyped (splits, noise)")
     return originals
 
 
